@@ -4,7 +4,7 @@ import os
 from discord import FFmpegPCMAudio
 
 # ========================= НАЛАШТУВАННЯ =========================
-token = "MTQ5ODM3NzE4MTYzMjY1OTUxNg.GJnUhF.1YgQNiG3Ewbd8FChBsjt_Y-otv1r67_RTLITus"  # ← ВСТАВ СВІЙ ТОКЕН
+token = "Discord token"  # ← ВСТАВ СВІЙ ТОКЕН
 SOUNDS_FOLDER = "sounds"
 
 # Інтенти
