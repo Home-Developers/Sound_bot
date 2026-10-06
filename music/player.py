@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import re
 import time
 from typing import List, Optional
 import discord
@@ -78,13 +79,18 @@ class GuildMusicPlayer:
             if not self.voice_client or not self.voice_client.is_connected():
                 return
 
+            # A command and the audio completion callback can both request the
+            # next track. Once one request starts playback, ignore the other.
+            if self.voice_client.is_playing() or self.voice_client.is_paused():
+                return
+
             # Обробка повтору поточного треку
             if self.loop_mode == "track" and self.current_track:
                 track_to_play = self.current_track
+            elif self.loop_mode == "queue" and self.current_track:
+                self.queue.append(self.current_track)
+                track_to_play = self.queue.pop(0)
             elif self.queue:
-                # Якщо режим повтору черги, попередній трек відправляємо в кінець
-                if self.loop_mode == "queue" and self.current_track:
-                    self.queue.append(self.current_track)
                 track_to_play = self.queue.pop(0)
             else:
                 self.current_track = None
@@ -118,9 +124,17 @@ class GuildMusicPlayer:
 
             except Exception as e:
                 logger.error(f"Не вдалося відтворити трек {track_to_play.full_title}: {e}")
+                # Не зациклюємося на треку, який не вдалося відкрити.
+                self.current_track = None
                 if self.text_channel:
+                    error_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(e))
+                    if "Sign in to confirm" in error_text:
+                        error_text = (
+                            "YouTube заблокував запит із сервера, а SoundCloud не повернув "
+                            "придатний аудіопотік. Спробуйте інший трек або посилання SoundCloud."
+                        )
                     await self.text_channel.send(
-                        f"⚠️ Не вдалося відтворити **{track_to_play.full_title}**: `{e}`. Переходжу до наступного..."
+                        f"⚠️ Не вдалося відтворити **{track_to_play.full_title}**: {error_text} Переходжу до наступного..."
                     )
                 # Пробуємо наступний трек
                 self.bot.loop.create_task(self.play_next())

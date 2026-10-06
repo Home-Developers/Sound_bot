@@ -33,7 +33,7 @@ class MusicCog(commands.Cog, name="Музика"):
 
         if not ctx.voice_client:
             try:
-                vc = await user_channel.connect(self_deaf=True)
+                vc = await user_channel.connect(self_deaf=False)
                 player.voice_client = vc
                 return vc
             except Exception as e:
@@ -52,6 +52,25 @@ class MusicCog(commands.Cog, name="Музика"):
                     await ctx.send(f"⚠️ Бот вже грає у каналі **{vc.channel.name}**!")
                     return None
             return vc
+
+    async def require_player_voice(self, ctx: commands.Context) -> Optional[GuildMusicPlayer]:
+        """Повертає плеєр, якщо автор команди в каналі з ботом."""
+        if not ctx.guild:
+            await ctx.send("❌ Ця команда доступна лише на сервері Discord.")
+            return None
+
+        player = self.players.get(ctx.guild.id)
+        voice_client = player.voice_client if player else None
+        if not voice_client or not voice_client.is_connected():
+            await ctx.send("❌ Бот не підключений до голосового каналу.")
+            return None
+
+        user_voice = getattr(ctx.author, "voice", None)
+        if not user_voice or user_voice.channel != voice_client.channel:
+            await ctx.send(f"❌ Зайдіть у голосовий канал **{voice_client.channel.name}**, щоб керувати плеєром.")
+            return None
+
+        return player
 
     @commands.hybrid_command(
         name="play",
@@ -127,7 +146,9 @@ class MusicCog(commands.Cog, name="Музика"):
 
     @commands.hybrid_command(name="pause", description="Призупинити поточне відтворення")
     async def pause(self, ctx: commands.Context):
-        player = self.get_player(ctx.guild)
+        player = await self.require_player_voice(ctx)
+        if not player:
+            return
         if player.voice_client and player.voice_client.is_playing():
             player.voice_client.pause()
             await ctx.send("⏸️ Відтворення призупинено.")
@@ -136,7 +157,9 @@ class MusicCog(commands.Cog, name="Музика"):
 
     @commands.hybrid_command(name="resume", description="Продовжити відтворення музики")
     async def resume(self, ctx: commands.Context):
-        player = self.get_player(ctx.guild)
+        player = await self.require_player_voice(ctx)
+        if not player:
+            return
         if player.voice_client and player.voice_client.is_paused():
             player.voice_client.resume()
             await ctx.send("▶️ Відтворення продовжено.")
@@ -145,7 +168,9 @@ class MusicCog(commands.Cog, name="Музика"):
 
     @commands.hybrid_command(name="skip", aliases=["s", "next"], description="Пропустити поточний трек")
     async def skip(self, ctx: commands.Context):
-        player = self.get_player(ctx.guild)
+        player = await self.require_player_voice(ctx)
+        if not player:
+            return
         if not player.voice_client or not (player.voice_client.is_playing() or player.voice_client.is_paused()):
             await ctx.send("❌ Немає активного треку для пропуску.")
             return
@@ -156,9 +181,8 @@ class MusicCog(commands.Cog, name="Музика"):
 
     @commands.hybrid_command(name="stop", aliases=["disconnect", "leave"], description="Зупинити музику та вийти з голосового каналу")
     async def stop(self, ctx: commands.Context):
-        player = self.get_player(ctx.guild)
-        if not player.voice_client and not ctx.voice_client:
-            await ctx.send("❌ Бот не перебуває у голосовому каналі.")
+        player = await self.require_player_voice(ctx)
+        if not player:
             return
 
         await player.stop()
@@ -182,7 +206,9 @@ class MusicCog(commands.Cog, name="Музика"):
 
     @commands.hybrid_command(name="loop", description="Перемкнути режим повтору (off / track / queue)")
     async def loop(self, ctx: commands.Context, mode: Optional[Literal["off", "track", "queue"]] = None):
-        player = self.get_player(ctx.guild)
+        player = await self.require_player_voice(ctx)
+        if not player:
+            return
 
         if mode is None:
             # Циклічне перемикання
@@ -200,7 +226,9 @@ class MusicCog(commands.Cog, name="Музика"):
 
     @commands.hybrid_command(name="shuffle", description="Перемішати треки у черзі у випадковому порядку")
     async def shuffle(self, ctx: commands.Context):
-        player = self.get_player(ctx.guild)
+        player = await self.require_player_voice(ctx)
+        if not player:
+            return
         if len(player.queue) < 2:
             await ctx.send("❌ Для перемішування у черзі має бути щонайменше 2 треки.")
             return
@@ -210,7 +238,9 @@ class MusicCog(commands.Cog, name="Музика"):
 
     @commands.hybrid_command(name="clear", description="Очистити всі треки з черги")
     async def clear(self, ctx: commands.Context):
-        player = self.get_player(ctx.guild)
+        player = await self.require_player_voice(ctx)
+        if not player:
+            return
         count = len(player.queue)
         player.clear()
         await ctx.send(f"🗑️ Очищено **{count}** треків з черги.")
@@ -221,7 +251,9 @@ class MusicCog(commands.Cog, name="Музика"):
             await ctx.send("❌ Будь ласка, вкажіть гучність у діапазоні від 1 до 200%.")
             return
 
-        player = self.get_player(ctx.guild)
+        player = await self.require_player_voice(ctx)
+        if not player:
+            return
         player.set_volume(percent / 100.0)
         await ctx.send(f"🔊 Гучність встановлено на **{percent}%**.")
 

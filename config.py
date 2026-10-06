@@ -18,13 +18,18 @@ YTDL_OPTIONS = {
     "outtmpl": "%(extractor)s-%(id)s-%(title)s.%(ext)s",
     "restrictfilenames": True,
     "noplaylist": True,
-    "nocheckcertificate": True,
+    "nocheckcertificate": False,
     "ignoreerrors": False,
     "logtostderr": False,
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "ios"]
+        }
+    },
 }
 
 # Опції FFmpeg для стабільної трансляції аудіопотоків без переривань
