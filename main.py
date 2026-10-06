@@ -47,16 +47,20 @@ class SoundBot(commands.Bot):
             logger.error(f"Помилка синхронізації слеш-команд: {e}")
 
     async def on_ready(self):
-        logger.info(f"==================================================")
+        logger.info("==================================================")
         logger.info(f"Бот успішно увійшов як: {self.user} (ID: {self.user.id})")
         logger.info(f"Підключено до серверів: {len(self.guilds)}")
         logger.info(f"Префікс команд: '{config.COMMAND_PREFIX}' та слеш-команди '/'")
-        logger.info(f"Підтримка: Spotify, SoundCloud, Deezer")
-        logger.info(f"==================================================")
+        logger.info("Підтримка: Spotify, SoundCloud, Deezer, YouTube")
+        if config.is_ffmpeg_available():
+            logger.info(f"FFmpeg успішно знайдено: {config.FFMPEG_EXECUTABLE}")
+        else:
+            logger.warning("⚠️ УВАГА: FFmpeg не знайдено на системі! Без нього бот не зможе транслювати аудіо.")
+        logger.info("==================================================")
 
         activity = discord.Activity(
             type=discord.ActivityType.listening,
-            name=f"/play | Spotify, SoundCloud, Deezer"
+            name=f"{config.COMMAND_PREFIX}play | /play"
         )
         await self.change_presence(status=discord.Status.online, activity=activity)
 
