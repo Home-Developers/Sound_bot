@@ -453,12 +453,54 @@ class MusicResolver:
             return await self._resolve_generic(query, requester)
 
     async def _resolve_generic(self, query: str, requester) -> Tuple[List[TrackInfo], str]:
-        """Загальний пошук треку через YouTube / прямий лінк за допомогою yt-dlp"""
+        """
+        Загальний пошук треку або обробка прямого лінку.
+        Для текстових запитів віддає пріоритет SoundCloud (який ніколи не блокує серверні IP).
+        Якщо передано посилання на YouTube і воно заблоковане сервером YouTube,
+        назва витягується через YouTube oEmbed, а звук транслюється через SoundCloud.
+        """
         loop = asyncio.get_running_loop()
         is_url = query.startswith("http://") or query.startswith("https://")
-        is_search_prefix = any(query.startswith(p) for p in ("ytsearch", "scsearch"))
-        search_target = query if (is_url or is_search_prefix) else f"ytsearch1:{query}"
+        is_youtube = "youtube.com" in query or "youtu.be" in query
 
+        # Для звичайного текстового пошуку шукаємо спочатку на SoundCloud
+        if not is_url:
+            search_target = query if any(query.startswith(p) for p in ("scsearch", "ytsearch")) else f"scsearch1:{query}"
+            try:
+                info = await loop.run_in_executor(
+                    None,
+                    lambda: self.ydl.extract_info(search_target, download=False)
+                )
+                entries = info.get("entries") if info else []
+                if entries:
+                    first = entries[0]
+                    title = first.get("title", query)
+                    artist = first.get("uploader", "")
+                    duration = int(first.get("duration", 0) or 0)
+                    thumbnail = first.get("thumbnail", "")
+                    stream_url = first.get("url")
+                    if not stream_url and "formats" in first:
+                        stream_url = first["formats"][-1].get("url")
+
+                    track = TrackInfo(
+                        title=title,
+                        artist=artist,
+                        source_url=first.get("webpage_url", query),
+                        source_type="soundcloud",
+                        duration=duration,
+                        thumbnail=thumbnail,
+                        search_query=query,
+                        requester_name=requester.display_name,
+                        requester_id=requester.id,
+                        requester_mention=requester.mention,
+                        stream_url=stream_url
+                    )
+                    return [track], title
+            except Exception as sc_err:
+                logger.warning(f"SoundCloud пошук не дав результату ({sc_err}), спроба через YouTube...")
+
+        # Якщо це URL або якщо на SoundCloud нічого не знайдено, пробуємо через yt-dlp
+        search_target = query if is_url else f"ytsearch1:{query}"
         try:
             info = await loop.run_in_executor(
                 None,
@@ -494,24 +536,122 @@ class MusicResolver:
                 stream_url=stream_url
             )
             return [track], title
+
         except Exception as e:
-            logger.error(f"Помилка загального пошуку: {e}")
+            # Якщо це YouTube лінк і YouTube видав помилку блокування бота
+            if is_youtube:
+                logger.info(f"YouTube заблокував прямий потік. Отримую назву через oEmbed...")
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        oembed_url = f"https://www.youtube.com/oembed?url={query}&format=json"
+                        async with session.get(oembed_url) as resp:
+                            if resp.status == 200:
+                                oembed_data = await resp.json()
+                                yt_title = oembed_data.get("title", "")
+                                yt_author = oembed_data.get("author_name", "")
+                                fallback_query = f"{yt_author} - {yt_title}".strip(" -") or yt_title
+                                
+                                # Шукаємо звук через SoundCloud
+                                sc_info = await loop.run_in_executor(
+                                    None,
+                                    lambda: self.ydl.extract_info(f"scsearch1:{fallback_query}", download=False)
+                                )
+                                sc_entries = sc_info.get("entries") if sc_info else []
+                                if sc_entries:
+                                    sc_first = sc_entries[0]
+                                    track = TrackInfo(
+                                        title=yt_title or sc_first.get("title", fallback_query),
+                                        artist=yt_author or sc_first.get("uploader", ""),
+                                        source_url=query,
+                                        source_type="soundcloud",
+                                        duration=int(sc_first.get("duration", 0) or 0),
+                                        thumbnail=oembed_data.get("thumbnail_url", ""),
+                                        search_query=fallback_query,
+                                        requester_name=requester.display_name,
+                                        requester_id=requester.id,
+                                        requester_mention=requester.mention,
+                                        stream_url=sc_first.get("url")
+                                    )
+                                    return [track], track.title
+                    except Exception as oembed_err:
+                        logger.error(f"Помилка oEmbed обходу YouTube: {oembed_err}")
+
             raise e
 
     async def get_stream_url(self, track: TrackInfo) -> str:
         """
         Отримує робочий прямий стрім-URL для FFmpeg.
         Якщо URL вже збережено і це прямий потік, перевіряє його.
-        В іншому разі виконує пошук та витягує свіжий стрім.
+        В іншому разі виконує пошук та витягує свіжий стрім через SoundCloud або YouTube.
         """
-        if track.stream_url and not track.stream_url.startswith("http://localhost"):
+        # YouTube direct URLs can expire or be blocked on hosting IPs. For
+        # YouTube tracks, resolve a fresh SoundCloud stream before reusing one.
+        if (
+            track.stream_url
+            and not track.stream_url.startswith("http://localhost")
+            and track.source_type != "youtube"
+        ):
             return track.stream_url
 
         loop = asyncio.get_running_loop()
         query = track.search_query or f"{track.artist} - {track.title}".strip(" -")
         is_url = query.startswith("http://") or query.startswith("https://")
-        search_target = query if is_url else f"ytsearch1:{query}"
 
+        async def find_soundcloud_stream(search_query: str) -> Optional[str]:
+            """Знаходить реальний аудіопотік серед кількох результатів SoundCloud."""
+            target = f"scsearch5:{search_query}"
+            info = await loop.run_in_executor(
+                None,
+                lambda: self.ydl.extract_info(target, download=False)
+            )
+            entries = (info or {}).get("entries") or []
+            for entry in entries[:5]:
+                if not entry:
+                    continue
+
+                stream_url = entry.get("url")
+                if stream_url and stream_url.startswith("http"):
+                    return stream_url
+
+                # Деякі результати пошуку містять лише сторінку треку.
+                page_url = entry.get("webpage_url") or entry.get("original_url")
+                if not page_url:
+                    continue
+                resolved = await loop.run_in_executor(
+                    None,
+                    lambda page_url=page_url: self.ydl.extract_info(page_url, download=False)
+                )
+                stream_url = (resolved or {}).get("url")
+                if stream_url and stream_url.startswith("http"):
+                    return stream_url
+
+            return None
+
+        # YouTube often blocks datacenter IPs. Try a title-based SoundCloud
+        # match first so a cached YouTube URL cannot bypass the fallback.
+        if track.source_type == "youtube":
+            try:
+                stream_url = await find_soundcloud_stream(track.full_title)
+                if stream_url:
+                    track.stream_url = stream_url
+                    return stream_url
+            except Exception as sc_err:
+                logger.warning(
+                    f"SoundCloud fallback для YouTube-треку {track.full_title} не вдався: {sc_err}"
+                )
+
+        # Для не-URL (наприклад треки зі Spotify та Deezer) шукаємо стрім у SoundCloud, де немає капчі
+        if not is_url:
+            try:
+                stream_url = await find_soundcloud_stream(query)
+                if stream_url:
+                    track.stream_url = stream_url
+                    return stream_url
+            except Exception as sc_err:
+                logger.warning(f"SoundCloud стрім для {query} не вдався ({sc_err}), спроба YouTube...")
+
+        # Запасний варіант: пошук через YouTube
+        search_target = query if is_url else f"ytsearch1:{query}"
         try:
             info = await loop.run_in_executor(
                 None,
@@ -529,20 +669,20 @@ class MusicResolver:
             track.stream_url = stream_url
             return stream_url
         except Exception as e:
-            logger.error(f"Помилка отримання стріму: {e}")
-            # Спробуємо fallback через SoundCloud search
-            if not is_url:
-                try:
-                    sc_target = f"scsearch1:{query}"
-                    sc_info = await loop.run_in_executor(
-                        None,
-                        lambda: self.ydl.extract_info(sc_target, download=False)
-                    )
-                    if "entries" in sc_info and sc_info["entries"]:
-                        stream_url = sc_info["entries"][0].get("url")
-                        if stream_url:
-                            track.stream_url = stream_url
-                            return stream_url
-                except Exception as sc_err:
-                    logger.error(f"SoundCloud fallback також зазнав невдачі: {sc_err}")
+            logger.error(f"Помилка отримання стріму через YouTube: {e}")
+            # Останній шанс: якщо це був YouTube URL, спробуємо знайти в SoundCloud за назвою треку
+            try:
+                fallback_target = f"scsearch1:{track.full_title}"
+                sc_info = await loop.run_in_executor(
+                    None,
+                    lambda: self.ydl.extract_info(fallback_target, download=False)
+                )
+                entries = sc_info.get("entries") if sc_info else []
+                if entries:
+                    stream_url = entries[0].get("url")
+                    if stream_url:
+                        track.stream_url = stream_url
+                        return stream_url
+            except Exception:
+                pass
             raise e
